@@ -84,7 +84,7 @@ class base_model(object):
         t_process, t_wall = time.process_time(), time.time()
         sess = tf.Session(graph=self.graph)
         shutil.rmtree(self._get_path('summaries'), ignore_errors=True)
-        writer = tf.train.SummaryWriter(self._get_path('summaries'), self.graph)
+        writer = tf.summary.FileWriter(self._get_path('summaries'), self.graph)
         shutil.rmtree(self._get_path('checkpoints'), ignore_errors=True)
         os.makedirs(self._get_path('checkpoints'))
         path = os.path.join(self._get_path('checkpoints'), 'model')
@@ -165,10 +165,10 @@ class base_model(object):
             self.op_prediction = self.prediction(op_logits)
 
             # Initialize variables, i.e. weights and biases.
-            self.op_init = tf.initialize_all_variables()
+            self.op_init = tf.global_variables_initializer()
             
             # Summaries for TensorBoard and Save for model parameters.
-            self.op_summary = tf.merge_all_summaries()
+            self.op_summary = tf.summary.merge_all()
             self.op_saver = tf.train.Saver(max_to_keep=5)
         
         self.graph.finalize()
@@ -199,7 +199,7 @@ class base_model(object):
     def prediction(self, logits):
         """Return the predicted classes."""
         with tf.name_scope('prediction'):
-            prediction = tf.argmax(logits, dimension=1)
+            prediction = tf.argmax(logits, axis=1)
             return prediction
 
     def loss(self, logits, labels, regularization):
@@ -207,22 +207,22 @@ class base_model(object):
         with tf.name_scope('loss'):
             with tf.name_scope('cross_entropy'):
                 labels = tf.to_int64(labels)
-                cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(logits, labels)
+                cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=labels)
                 cross_entropy = tf.reduce_mean(cross_entropy)
             with tf.name_scope('regularization'):
                 regularization *= tf.add_n(self.regularizers)
             loss = cross_entropy + regularization
             
             # Summaries for TensorBoard.
-            tf.scalar_summary('loss/cross_entropy', cross_entropy)
-            tf.scalar_summary('loss/regularization', regularization)
-            tf.scalar_summary('loss/total', loss)
+            tf.summary.scalar('loss/cross_entropy', cross_entropy)
+            tf.summary.scalar('loss/regularization', regularization)
+            tf.summary.scalar('loss/total', loss)
             with tf.name_scope('averages'):
                 averages = tf.train.ExponentialMovingAverage(0.9)
                 op_averages = averages.apply([cross_entropy, regularization, loss])
-                tf.scalar_summary('loss/avg/cross_entropy', averages.average(cross_entropy))
-                tf.scalar_summary('loss/avg/regularization', averages.average(regularization))
-                tf.scalar_summary('loss/avg/total', averages.average(loss))
+                tf.summary.scalar('loss/avg/cross_entropy', averages.average(cross_entropy))
+                tf.summary.scalar('loss/avg/regularization', averages.average(regularization))
+                tf.summary.scalar('loss/avg/total', averages.average(loss))
                 with tf.control_dependencies([op_averages]):
                     loss_average = tf.identity(averages.average(loss), name='control')
             return loss, loss_average
@@ -235,7 +235,7 @@ class base_model(object):
             if decay_rate != 1:
                 learning_rate = tf.train.exponential_decay(
                         learning_rate, global_step, decay_steps, decay_rate, staircase=True)
-            tf.scalar_summary('learning_rate', learning_rate)
+            tf.summary.scalar('learning_rate', learning_rate)
             # Optimizer.
             if momentum == 0:
                 optimizer = tf.train.GradientDescentOptimizer(learning_rate)
@@ -249,7 +249,7 @@ class base_model(object):
                 if grad is None:
                     print('warning: {} has no gradient'.format(var.op.name))
                 else:
-                    tf.histogram_summary(var.op.name + '/gradients', grad)
+                    tf.summary.histogram(var.op.name + '/gradients', grad)
             # The op return the learning rate.
             with tf.control_dependencies([op_gradients]):
                 op_train = tf.identity(learning_rate, name='control')
@@ -274,7 +274,7 @@ class base_model(object):
         var = tf.get_variable('weights', shape, tf.float32, initializer=initial)
         if regularization:
             self.regularizers.append(tf.nn.l2_loss(var))
-        tf.histogram_summary(var.op.name, var)
+        tf.summary.histogram(var.op.name, var)
         return var
 
     def _bias_variable(self, shape, regularization=True):
@@ -282,7 +282,7 @@ class base_model(object):
         var = tf.get_variable('bias', shape, tf.float32, initializer=initial)
         if regularization:
             self.regularizers.append(tf.nn.l2_loss(var))
-        tf.histogram_summary(var.op.name, var)
+        tf.summary.histogram(var.op.name, var)
         return var
 
     def _conv2d(self, x, W):
@@ -341,366 +341,6 @@ class cnn2(base_model):
             y = tf.matmul(y, W) + b
         return y
 
-class fcnn2(base_model):
-    """CNN using the FFT."""
-    def __init__(self, F):
-        super().__init__()
-        self.F = F  # Number of features
-    def _inference(self, x, dropout):
-        with tf.name_scope('conv1'):
-            # Transform to Fourier domain
-            x_2d = tf.reshape(x, [-1, 28, 28])
-            x_2d = tf.complex(x_2d, 0)
-            xf_2d = tf.batch_fft2d(x_2d)
-            xf = tf.reshape(xf_2d, [-1, NFEATURES])
-            xf = tf.expand_dims(xf, 1)  # NSAMPLES x 1 x NFEATURES
-            xf = tf.transpose(xf)  # NFEATURES x 1 x NSAMPLES
-            # Filter
-            Wreal = self._weight_variable([int(NFEATURES/2), self.F, 1])
-            Wimg = self._weight_variable([int(NFEATURES/2), self.F, 1])
-            W = tf.complex(Wreal, Wimg)
-            xf = xf[:int(NFEATURES/2), :, :]
-            yf = tf.batch_matmul(W, xf)  # for each feature
-            yf = tf.concat(0, [yf, tf.conj(yf)])
-            yf = tf.transpose(yf)  # NSAMPLES x NFILTERS x NFEATURES
-            yf_2d = tf.reshape(yf, [-1, 28, 28])
-            # Transform back to spatial domain
-            y_2d = tf.batch_ifft2d(yf_2d)
-            y_2d = tf.real(y_2d)
-            y = tf.reshape(y_2d, [-1, self.F, NFEATURES])
-            # Bias and non-linearity
-            b = self._bias_variable([1, self.F, 1])
-#            b = self._bias_variable([1, self.F, NFEATURES])
-            y += b  # NSAMPLES x NFILTERS x NFEATURES
-            y = tf.nn.relu(y)
-        with tf.name_scope('fc1'):
-            W = self._weight_variable([self.F*NFEATURES, NCLASSES])
-            b = self._bias_variable([NCLASSES])
-            y = tf.reshape(y, [-1, self.F*NFEATURES])
-            y = tf.matmul(y, W) + b
-        return y
-
-
-# Graph convolutional
-
-
-class fgcnn2(base_model):
-    """Graph CNN with full weights, i.e. patch has the same size as input."""
-    def __init__(self, L, F):
-        super().__init__()
-        #self.L = L  # Graph Laplacian, NFEATURES x NFEATURES
-        self.F = F  # Number of filters
-        _, self.U = graph.fourier(L)
-    def _inference(self, x, dropout):
-        # x: NSAMPLES x NFEATURES
-        with tf.name_scope('gconv1'):
-            # Transform to Fourier domain
-            U = tf.constant(self.U, dtype=tf.float32)
-            xf = tf.matmul(x, U)
-            xf = tf.expand_dims(xf, 1)  # NSAMPLES x 1 x NFEATURES
-            xf = tf.transpose(xf)  # NFEATURES x 1 x NSAMPLES
-            # Filter
-            W = self._weight_variable([NFEATURES, self.F, 1])
-            yf = tf.batch_matmul(W, xf)  # for each feature
-            yf = tf.transpose(yf)  # NSAMPLES x NFILTERS x NFEATURES
-            yf = tf.reshape(yf, [-1, NFEATURES])
-            # Transform back to graph domain
-            Ut = tf.transpose(U)
-            y = tf.matmul(yf, Ut)
-            y = tf.reshape(yf, [-1, self.F, NFEATURES])
-            # Bias and non-linearity
-            b = self._bias_variable([1, self.F, 1])
-#            b = self._bias_variable([1, self.F, NFEATURES])
-            y += b  # NSAMPLES x NFILTERS x NFEATURES
-            y = tf.nn.relu(y)
-        with tf.name_scope('fc1'):
-            W = self._weight_variable([self.F*NFEATURES, NCLASSES])
-            b = self._bias_variable([NCLASSES])
-            y = tf.reshape(y, [-1, self.F*NFEATURES])
-            y = tf.matmul(y, W) + b
-        return y
-
-
-class lgcnn2_1(base_model):
-    """Graph CNN which uses the Lanczos approximation."""
-    def __init__(self, L, F, K):
-        super().__init__()
-        self.L = L  # Graph Laplacian, M x M
-        self.F = F  # Number of filters
-        self.K = K  # Polynomial order, i.e. filter size (number of hopes)
-    def _inference(self, x, dropout):
-        with tf.name_scope('gconv1'):
-            N, M, K = x.get_shape()  # N: number of samples, M: number of features
-            M = int(M)
-            # Transform to Lanczos basis
-            xl = tf.reshape(x, [-1, self.K])  # NM x K
-            # Filter
-            W = self._weight_variable([self.K, self.F])
-            y = tf.matmul(xl, W)  # NM x F
-            y = tf.reshape(y, [-1, M, self.F])  # N x M x F
-            # Bias and non-linearity
-            b = self._bias_variable([1, 1, self.F])
-#            b = self._bias_variable([1, M, self.F])
-            y += b  # N x M x F
-            y = tf.nn.relu(y)
-        with tf.name_scope('fc1'):
-            W = self._weight_variable([self.F*M, NCLASSES])
-            b = self._bias_variable([NCLASSES])
-            y = tf.reshape(y, [-1, self.F*M])
-            y = tf.matmul(y, W) + b
-        return y
-
-class lgcnn2_2(base_model):
-    """Graph CNN which uses the Lanczos approximation."""
-    def __init__(self, L, F, K):
-        super().__init__()
-        self.L = L  # Graph Laplacian, M x M
-        self.F = F  # Number of filters
-        self.K = K  # Polynomial order, i.e. filter size (number of hopes)
-    def _inference(self, x, dropout):
-        with tf.name_scope('gconv1'):
-            N, M = x.get_shape()  # N: number of samples, M: number of features
-            M = int(M)
-            # Transform to Lanczos basis
-            xl = tf.transpose(x)  # M x N
-            def lanczos(x):
-                return graph.lanczos(self.L, x, self.K)
-            xl = tf.py_func(lanczos, [xl], [tf.float32])[0]
-            xl = tf.transpose(xl)  # N x M x K
-            xl = tf.reshape(xl, [-1, self.K])  # NM x K
-            # Filter
-            W = self._weight_variable([self.K, self.F])
-            y = tf.matmul(xl, W)  # NM x F
-            y = tf.reshape(y, [-1, M, self.F])  # N x M x F
-            # Bias and non-linearity
-#            b = self._bias_variable([1, 1, self.F])
-            b = self._bias_variable([1, M, self.F])
-            y += b  # N x M x F
-            y = tf.nn.relu(y)
-        with tf.name_scope('fc1'):
-            W = self._weight_variable([self.F*M, NCLASSES])
-            b = self._bias_variable([NCLASSES])
-            y = tf.reshape(y, [-1, self.F*M])
-            y = tf.matmul(y, W) + b
-        return y
-
-
-class cgcnn2_2(base_model):
-    """Graph CNN which uses the Chebyshev approximation."""
-    def __init__(self, L, F, K):
-        super().__init__()
-        self.L = graph.rescale_L(L, lmax=2)  # Graph Laplacian, M x M
-        self.F = F  # Number of filters
-        self.K = K  # Polynomial order, i.e. filter size (number of hopes)
-    def _inference(self, x, dropout):
-        with tf.name_scope('gconv1'):
-            N, M = x.get_shape()  # N: number of samples, M: number of features
-            M = int(M)
-            # Transform to Chebyshev basis
-            xc = tf.transpose(x)  # M x N
-            def chebyshev(x):
-                return graph.chebyshev(self.L, x, self.K)
-            xc = tf.py_func(chebyshev, [xc], [tf.float32])[0]
-            xc = tf.transpose(xc)  # N x M x K
-            xc = tf.reshape(xc, [-1, self.K])  # NM x K
-            # Filter
-            W = self._weight_variable([self.K, self.F])
-            y = tf.matmul(xc, W)  # NM x F
-            y = tf.reshape(y, [-1, M, self.F])  # N x M x F
-            # Bias and non-linearity
-#            b = self._bias_variable([1, 1, self.F])
-            b = self._bias_variable([1, M, self.F])
-            y += b  # N x M x F
-            y = tf.nn.relu(y)
-        with tf.name_scope('fc1'):
-            W = self._weight_variable([self.F*M, NCLASSES])
-            b = self._bias_variable([NCLASSES])
-            y = tf.reshape(y, [-1, self.F*M])
-            y = tf.matmul(y, W) + b
-        return y
-
-
-class cgcnn2_3(base_model):
-    """Graph CNN which uses the Chebyshev approximation."""
-    def __init__(self, L, F, K):
-        super().__init__()
-        L = graph.rescale_L(L, lmax=2)  # Graph Laplacian, M x M
-        self.L = L.toarray()
-        self.F = F  # Number of filters
-        self.K = K  # Polynomial order, i.e. filter size (number of hopes)
-    def _inference(self, x, dropout):
-        with tf.name_scope('gconv1'):
-            N, M = x.get_shape()  # N: number of samples, M: number of features
-            M = int(M)
-            # Filter
-            W = self._weight_variable([self.K, self.F])
-            def filter(xt, k):
-                xt = tf.reshape(xt, [-1, 1])  # NM x 1
-                w = tf.slice(W, [k,0], [1,-1])  # 1 x F
-                y = tf.matmul(xt, w)  # NM x F
-                return tf.reshape(y, [-1, M, self.F])  # N x M x F
-            xt0 = x
-            y = filter(xt0, 0)
-            if self.K > 1:
-                xt1 = tf.matmul(x, self.L, b_is_sparse=True)  # N x M
-                y += filter(xt1, 1)
-            for k in range(2, self.K):
-                xt2 = 2 * tf.matmul(xt1, self.L, b_is_sparse=True) - xt0  # N x M
-                y += filter(xt2, k)
-                xt0, xt1 = xt1, xt2
-            # Bias and non-linearity
-#            b = self._bias_variable([1, 1, self.F])
-            b = self._bias_variable([1, M, self.F])
-            y += b  # N x M x F
-            y = tf.nn.relu(y)
-        with tf.name_scope('fc1'):
-            W = self._weight_variable([self.F*M, NCLASSES])
-            b = self._bias_variable([NCLASSES])
-            y = tf.reshape(y, [-1, self.F*M])
-            y = tf.matmul(y, W) + b
-        return y
-
-
-class cgcnn2_4(base_model):
-    """Graph CNN which uses the Chebyshev approximation."""
-    def __init__(self, L, F, K):
-        super().__init__()
-        L = graph.rescale_L(L, lmax=2)  # Graph Laplacian, M x M
-        L = L.tocoo()
-        data = L.data
-        indices = np.empty((L.nnz, 2))
-        indices[:,0] = L.row
-        indices[:,1] = L.col
-        L = tf.SparseTensor(indices, data, L.shape)
-        self.L = tf.sparse_reorder(L)
-        self.F = F  # Number of filters
-        self.K = K  # Polynomial order, i.e. filter size (number of hopes)
-    def _inference(self, x, dropout):
-        with tf.name_scope('gconv1'):
-            N, M = x.get_shape()  # N: number of samples, M: number of features
-            M = int(M)
-            # Filter
-            W = self._weight_variable([self.K, self.F])
-            def filter(xt, k):
-                xt = tf.transpose(xt)  # N x M
-                xt = tf.reshape(xt, [-1, 1])  # NM x 1
-                w = tf.slice(W, [k,0], [1,-1])  # 1 x F
-                y = tf.matmul(xt, w)  # NM x F
-                return tf.reshape(y, [-1, M, self.F])  # N x M x F
-            xt0 = tf.transpose(x)  # M x N
-            y = filter(xt0, 0)
-            if self.K > 1:
-                xt1 = tf.sparse_tensor_dense_matmul(self.L, xt0)
-                y += filter(xt1, 1)
-            for k in range(2, self.K):
-                xt2 = 2 * tf.sparse_tensor_dense_matmul(self.L, xt1) - xt0  # M x N
-                y += filter(xt2, k)
-                xt0, xt1 = xt1, xt2
-            # Bias and non-linearity
-#            b = self._bias_variable([1, 1, self.F])
-            b = self._bias_variable([1, M, self.F])
-            y += b  # N x M x F
-            y = tf.nn.relu(y)
-        with tf.name_scope('fc1'):
-            W = self._weight_variable([self.F*M, NCLASSES])
-            b = self._bias_variable([NCLASSES])
-            y = tf.reshape(y, [-1, self.F*M])
-            y = tf.matmul(y, W) + b
-        return y
-
-
-class cgcnn2_5(base_model):
-    """Graph CNN which uses the Chebyshev approximation."""
-    def __init__(self, L, F, K):
-        super().__init__()
-        L = graph.rescale_L(L, lmax=2)  # Graph Laplacian, M x M
-        L = L.tocoo()
-        data = L.data
-        indices = np.empty((L.nnz, 2))
-        indices[:,0] = L.row
-        indices[:,1] = L.col
-        L = tf.SparseTensor(indices, data, L.shape)
-        self.L = tf.sparse_reorder(L)
-        self.F = F  # Number of filters
-        self.K = K  # Polynomial order, i.e. filter size (number of hopes)
-    def _inference(self, x, dropout):
-        with tf.name_scope('gconv1'):
-            N, M = x.get_shape()  # N: number of samples, M: number of features
-            M = int(M)
-            # Transform to Chebyshev basis
-            xt0 = tf.transpose(x)  # M x N
-            xt = tf.expand_dims(xt0, 0)  # 1 x M x N
-            def concat(xt, x):
-                x = tf.expand_dims(x, 0)  # 1 x M x N
-                return tf.concat(0, [xt, x])  # K x M x N
-            if self.K > 1:
-                xt1 = tf.sparse_tensor_dense_matmul(self.L, xt0)
-                xt = concat(xt, xt1)
-            for k in range(2, self.K):
-                xt2 = 2 * tf.sparse_tensor_dense_matmul(self.L, xt1) - xt0  # M x N
-                xt = concat(xt, xt2)
-                xt0, xt1 = xt1, xt2
-            xt = tf.transpose(xt)  # N x M x K
-            xt = tf.reshape(xt, [-1,self.K])  # NM x K
-            # Filter
-            W = self._weight_variable([self.K, self.F])
-            y = tf.matmul(xt, W)  # NM x F
-            y = tf.reshape(y, [-1, M, self.F])  # N x M x F
-            # Bias and non-linearity
-#            b = self._bias_variable([1, 1, self.F])
-            b = self._bias_variable([1, M, self.F])
-            y += b  # N x M x F
-            y = tf.nn.relu(y)
-        with tf.name_scope('fc1'):
-            W = self._weight_variable([self.F*M, NCLASSES])
-            b = self._bias_variable([NCLASSES])
-            y = tf.reshape(y, [-1, self.F*M])
-            y = tf.matmul(y, W) + b
-        return y
-
-
-def bspline_basis(K, x, degree=3):
-    """
-    Return the B-spline basis.
-
-    K: number of control points.
-    x: evaluation points
-       or number of evenly distributed evaluation points.
-    degree: degree of the spline. Cubic spline by default.
-    """
-    if np.isscalar(x):
-        x = np.linspace(0, 1, x)
-
-    # Evenly distributed knot vectors.
-    kv1 = x.min() * np.ones(degree)
-    kv2 = np.linspace(x.min(), x.max(), K-degree+1)
-    kv3 = x.max() * np.ones(degree)
-    kv = np.concatenate((kv1, kv2, kv3))
-
-    # Cox - DeBoor recursive function to compute one spline over x.
-    def cox_deboor(k, d):
-        # Test for end conditions, the rectangular degree zero spline.
-        if (d == 0):
-            return ((x - kv[k] >= 0) & (x - kv[k + 1] < 0)).astype(int)
-
-        denom1 = kv[k + d] - kv[k]
-        term1 = 0
-        if denom1 > 0:
-            term1 = ((x - kv[k]) / denom1) * cox_deboor(k, d - 1)
-
-        denom2 = kv[k + d + 1] - kv[k + 1]
-        term2 = 0
-        if denom2 > 0:
-            term2 = ((-(x - kv[k + d + 1]) / denom2) * cox_deboor(k + 1, d - 1))
-
-        return term1 + term2
-
-    # Compute basis for each point
-    basis = np.column_stack([cox_deboor(k, degree) for k in range(K)])
-    basis[-1,-1] = 1
-    return basis
-
-
 class cgcnn(base_model):
     """
     Graph CNN which uses the Chebyshev approximation.
@@ -748,12 +388,8 @@ class cgcnn(base_model):
         super().__init__()
         
         # Verify the consistency w.r.t. the number of layers.
-        assert len(L) >= len(F) == len(K) == len(p)
-        assert np.all(np.array(p) >= 1)
         p_log2 = np.where(np.array(p) > 1, np.log2(p), 0)
-        assert np.all(np.mod(p_log2, 1) == 0)  # Powers of 2.
-        assert len(L) >= 1 + np.sum(p_log2)  # Enough coarsening levels for pool sizes.
-        
+
         # Keep the useful Laplacians only. May be zero.
         M_0 = L[0].shape[0]
         j = 0
@@ -802,51 +438,7 @@ class cgcnn(base_model):
         
         # Build the computational graph.
         self.build_graph(M_0)
-        
-    def filter_in_fourier(self, x, L, Fout, K, U, W):
-        # TODO: N x F x M would avoid the permutations
-        N, M, Fin = x.get_shape()
-        N, M, Fin = int(N), int(M), int(Fin)
-        x = tf.transpose(x, perm=[1, 2, 0])  # M x Fin x N
-        # Transform to Fourier domain
-        x = tf.reshape(x, [M, Fin*N])  # M x Fin*N
-        x = tf.matmul(U, x)  # M x Fin*N
-        x = tf.reshape(x, [M, Fin, N])  # M x Fin x N
-        # Filter
-        x = tf.batch_matmul(W, x)  # for each feature
-        x = tf.transpose(x)  # N x Fout x M
-        x = tf.reshape(x, [N*Fout, M])  # N*Fout x M
-        # Transform back to graph domain
-        x = tf.matmul(x, U)  # N*Fout x M
-        x = tf.reshape(x, [N, Fout, M])  # N x Fout x M
-        return tf.transpose(x, perm=[0, 2, 1])  # N x M x Fout
 
-    def fourier(self, x, L, Fout, K):
-        assert K == L.shape[0]  # artificial but useful to compute number of parameters
-        N, M, Fin = x.get_shape()
-        N, M, Fin = int(N), int(M), int(Fin)
-        # Fourier basis
-        _, U = graph.fourier(L)
-        U = tf.constant(U.T, dtype=tf.float32)
-        # Weights
-        W = self._weight_variable([M, Fout, Fin], regularization=False)
-        return self.filter_in_fourier(x, L, Fout, K, U, W)
-
-    def spline(self, x, L, Fout, K):
-        N, M, Fin = x.get_shape()
-        N, M, Fin = int(N), int(M), int(Fin)
-        # Fourier basis
-        lamb, U = graph.fourier(L)
-        U = tf.constant(U.T, dtype=tf.float32)  # M x M
-        # Spline basis
-        B = bspline_basis(K, lamb, degree=3)  # M x K
-        #B = bspline_basis(K, len(lamb), degree=3)  # M x K
-        B = tf.constant(B, dtype=tf.float32)
-        # Weights
-        W = self._weight_variable([K, Fout*Fin], regularization=False)
-        W = tf.matmul(B, W)  # M x Fout*Fin
-        W = tf.reshape(W, [M, Fout, Fin])
-        return self.filter_in_fourier(x, L, Fout, K, U, W)
 
     def chebyshev2(self, x, L, Fout, K):
         """
@@ -855,7 +447,7 @@ class cgcnn(base_model):
         
         Data: x of size N x M x F
             N: number of signals
-            M: number of vertices
+            M: number of vertice_ins
             F: number of features per signal per vertex
         """
         N, M, Fin = x.get_shape()
@@ -893,7 +485,7 @@ class cgcnn(base_model):
         x = tf.expand_dims(x0, 0)  # 1 x M x Fin*N
         def concat(x, x_):
             x_ = tf.expand_dims(x_, 0)  # 1 x M x Fin*N
-            return tf.concat(0, [x, x_])  # K x M x Fin*N
+            return tf.concat([x, x_], axis=0)  # K x M x Fin*N
         if K > 1:
             x1 = tf.sparse_tensor_dense_matmul(L, x0)
             x = concat(x, x1)
@@ -933,10 +525,18 @@ class cgcnn(base_model):
 
     def apool1(self, x, p):
         """Average pooling of size p. Should be a power of 2."""
+        import math
         if p > 1:
-            x = tf.expand_dims(x, 3)  # N x M x F x 1
-            x = tf.nn.avg_pool(x, ksize=[1,p,1,1], strides=[1,p,1,1], padding='SAME')
-            return tf.squeeze(x, [3])  # N x M/p x F
+        #    x = tf.expand_dims(x, 3)  # N x M x F x 1
+        #    x = tf.nn.avg_pool(x, ksize=[1,p,1,1], strides=[1,p,1,1], padding='SAME')
+        #    return tf.squeeze(x, [3])  # N x M/p x F
+            #import pdb; pdb.set_trace()
+            N, M, F = x.get_shape().as_list()
+            M_sqrt = int(math.sqrt(M))
+            x = tf.reshape(x,[N, M_sqrt, M_sqrt, F])
+            x = tf.nn.avg_pool(x, ksize=[1, p, p, 1], strides=[1, p, p, 1], padding='SAME')
+            return tf.reshape(x, [N, int(M/4), F])
+
         else:
             return x
 
@@ -963,7 +563,8 @@ class cgcnn(base_model):
         # Fully connected hidden layers.
         N, M, F = x.get_shape()
         #x = tf.reshape(x, [int(N), int(M*F)])  # N x M
-        x = tf.math.reduce_mean(x,axis=1)
+        x = tf.math.reduce_mean(x, axis=1)
+        print("hello world")
         for i,M in enumerate(self.M[:-1]):
             with tf.variable_scope('fc{}'.format(i+1)):
                 x = self.fc(x, M)
@@ -973,3 +574,5 @@ class cgcnn(base_model):
         with tf.variable_scope('logits'):
             x = self.fc(x, self.M[-1], relu=False)
         return x
+
+print("hello world")
