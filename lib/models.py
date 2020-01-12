@@ -534,7 +534,7 @@ class cgcnn(base_model):
             N, M, F = x.get_shape().as_list()
             M_sqrt = int(math.sqrt(M))
             x = tf.reshape(x,[N, M_sqrt, M_sqrt, F])
-            x = tf.nn.avg_pool(x, ksize=[1, p, p, 1], strides=[1, p, p, 1], padding='SAME')
+            x = tf.nn.max_pool(x, ksize=[1, p, p, 1], strides=[1, p, p, 1], padding='SAME')
             return tf.reshape(x, [N, int(M/4), F])
 
         else:
