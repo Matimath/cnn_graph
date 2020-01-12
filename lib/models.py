@@ -563,7 +563,7 @@ class cgcnn(base_model):
         # Fully connected hidden layers.
         N, M, F = x.get_shape()
         #x = tf.reshape(x, [int(N), int(M*F)])  # N x M
-        x = tf.math.reduce_mean(x, axis=1)
+        x = tf.math.reduce_max(x, axis=1)
         print("hello world")
         for i,M in enumerate(self.M[:-1]):
             with tf.variable_scope('fc{}'.format(i+1)):
