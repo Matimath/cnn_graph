@@ -93,6 +93,8 @@ class base_model(object):
         # Training.
         accuracies = []
         losses = []
+        train_accuracies = []
+        train_losses = []
         indices = collections.deque()
         num_steps = int(self.num_epochs * train_data.shape[0] / self.batch_size)
         for step in range(1, num_steps+1):
@@ -113,9 +115,12 @@ class base_model(object):
                 epoch = step * self.batch_size / train_data.shape[0]
                 print('step {} / {} (epoch {:.2f} / {}):'.format(step, num_steps, epoch, self.num_epochs))
                 print('  learning_rate = {:.2e}, loss_average = {:.2e}'.format(learning_rate, loss_average))
+                train_string, train_accuracy, train_f1, train_loss = self.evaluate(train_data, train_labels, sess)
                 string, accuracy, f1, loss = self.evaluate(val_data, val_labels, sess)
                 accuracies.append(accuracy)
                 losses.append(loss)
+                train_accuracies.append(train_accuracy)
+                train_losses.append(train_loss)
                 print('  validation {}'.format(string))
                 print('  time: {:.0f}s (wall {:.0f}s)'.format(time.process_time()-t_process, time.time()-t_wall))
 
@@ -135,7 +140,7 @@ class base_model(object):
         sess.close()
         
         t_step = (time.time() - t_wall) / num_steps
-        return accuracies, losses, t_step
+        return accuracies, losses, train_accuracies, train_losses, t_step
 
     def get_var(self, name):
         sess = self._get_session()
